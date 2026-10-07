@@ -205,3 +205,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Campus notice demo local state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.demo-data/
+data/
+credentials.json
+cookies.txt
+cookies.json
+*storage-state*.json
+login_retry.json
+*.sqlite3*
+*.db
+*.log
+.env
+dist/
