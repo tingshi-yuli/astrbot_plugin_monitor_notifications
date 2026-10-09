@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from .notice_monitor import NAME, VERSION
 from .notice_monitor.auth import PortalClient
-from .notice_monitor.engine import Monitor
+from .notice_monitor.engine import DEFAULT_INTERVAL, Monitor
 from .notice_monitor.storage import State
 
 
@@ -32,7 +32,7 @@ class CampusNoticePlugin(Star):
             raise ValueError("推送会话需填写 /sid 返回的完整 UMO，不能只填 QQ 号或用户 ID。")
         directory = Path(StarTools.get_data_dir(NAME))
         state = State(directory)
-        interval = max(30, int(self.config.get("poll_interval_seconds", 180)))
+        interval = self.config.get("poll_interval_seconds", DEFAULT_INTERVAL)
         self.client = PortalClient(directory, username, password)
 
         async def send(text):

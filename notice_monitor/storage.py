@@ -1,4 +1,4 @@
-"""Only the seen IDs and not-yet-delivered notices are kept locally."""
+"""Local deduplication, pending notices and login-alert cooldown."""
 
 import json
 import os
@@ -40,6 +40,7 @@ class State:
                     and isinstance(data["seen"], list)
                     and all(isinstance(n, str) for n in data["seen"])
                     and isinstance(data["pending"], dict)
+                    and isinstance(data.get("login_alert_at", 0), (int, float))
                     and all(n["id"] == key and all(isinstance(n[k], str) for k in ("id", "title", "date", "url"))
                             for key, n in data["pending"].items())
                 )
@@ -66,7 +67,12 @@ class State:
             if self.data["initialized"] and notice.id not in seen:
                 pending[notice.id] = asdict(notice)
             seen.add(notice.id)
-        self._save({"initialized": True, "seen": sorted(seen), "pending": pending})
+        # A successful check ends the failure episode, allowing the next
+        # independent login failure to alert immediately.
+        self._save({"initialized": True, "seen": sorted(seen), "pending": pending, "login_alert_at": 0})
+
+    def login_alerted(self, timestamp):
+        self._save({**self.data, "login_alert_at": timestamp})
 
     def delivered(self, notice_id):
         pending = dict(self.pending)

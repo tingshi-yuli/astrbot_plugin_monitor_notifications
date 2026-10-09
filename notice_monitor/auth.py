@@ -114,7 +114,8 @@ class PortalClient:
                 )
             except requests.RequestException as exc:
                 # requests exceptions may include usernames, service tickets or URLs.
-                raise MonitorError(f"学校网络请求失败（{type(exc).__name__}），请检查网络或代理。") from None
+                error_type = LoginRequired if parsed.hostname == "ids.hit.edu.cn" else MonitorError
+                raise error_type(f"学校网络请求失败（{type(exc).__name__}），请检查网络或代理。") from None
             if response.is_redirect:
                 url = urljoin(response.url, response.headers["Location"])
                 if response.status_code == 303 or (method == "POST" and response.status_code in {301, 302}):
@@ -128,7 +129,8 @@ class PortalClient:
                     return response  # Let fetch() renew an expired portal session.
                 raise LoginRequired(f"学校拒绝访问（HTTP {response.status_code}），请检查账号和门户权限。")
             if response.status_code >= 400:
-                raise MonitorError(f"学校返回 HTTP {response.status_code}，稍后重试。")
+                error_type = LoginRequired if parsed.hostname == "ids.hit.edu.cn" else MonitorError
+                raise error_type(f"学校返回 HTTP {response.status_code}，稍后重试。")
             if response.encoding is None or response.encoding.lower() == "iso-8859-1":
                 response.encoding = "utf-8"
             return response
@@ -162,7 +164,7 @@ class PortalClient:
                       _eventId="submit", cllt="userNameLogin", dllt="generalLogin", rememberMe="true")
         result = self._request("POST", action, data=fields, headers={"Referer": response.url})
         if is_login(result.url, result.text):
-            raise LoginRequired("自动登录未完成，请检查账号密码、验证码或二次认证；15 分钟后重试。")
+            raise LoginRequired("自动登录未完成，请检查账号密码、验证码或二次认证。")
 
     def fetch(self) -> list[Notice]:
         notices = {}
@@ -172,13 +174,20 @@ class PortalClient:
             if response.status_code in {401, 403} or is_login(response.url, response.text):
                 if logged_in:
                     raise LoginRequired("登录后仍无法访问通知列表，请检查门户权限。")
-                if response.status_code in {401, 403}:
-                    self.cookies.clear()
-                    response = self._request("GET", LOGIN_URL)
-                if is_login(response.url, response.text):
-                    self._login(response)
-                logged_in = True
-                response = self._request("GET", list_url(page))
+                try:
+                    if response.status_code in {401, 403}:
+                        self.cookies.clear()
+                        response = self._request("GET", LOGIN_URL)
+                    if is_login(response.url, response.text):
+                        self._login(response)
+                    logged_in = True
+                    response = self._request("GET", list_url(page))
+                except LoginRequired:
+                    raise
+                except MonitorError as exc:
+                    # Network failures during authentication must also trigger
+                    # the login warning instead of only a background log.
+                    raise LoginRequired(f"重新登录失败：{exc}") from None
             if response.status_code in {401, 403}:
                 raise LoginRequired("登录后仍无法访问通知列表，请检查门户权限。")
             parsed = parse_notices(response.text, response.url)

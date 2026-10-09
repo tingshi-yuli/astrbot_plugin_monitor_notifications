@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from notice_monitor.auth import LOGIN_URL, PortalClient, encrypt_password, login_form
-from notice_monitor.engine import Monitor
+from notice_monitor.engine import DEFAULT_INTERVAL, LOGIN_ALERT_INTERVAL, Monitor
 from notice_monitor.sources import DEFAULT_URL, LoginRequired, MonitorError, Notice, ParseError, parse_notices
 from notice_monitor.storage import State
 
@@ -166,6 +166,67 @@ class CoreTests(unittest.TestCase):
                     with self.assertRaises(MonitorError):
                         client._request("POST", LOGIN_URL, data={"password": "fake-ciphertext"})
                     self.assertEqual(request.call_count, 1)
+            finally:
+                client.close()
+
+    def test_login_alert_retry_cooldown_restart_and_recovery(self):
+        async def exercise(directory):
+            failing = True
+            attempts = []
+
+            def fetch():
+                if failing:
+                    raise LoginRequired("学校要求验证码")
+                return parse_notices(LIST_HTML)
+
+            async def send(text):
+                attempts.append(text)
+                return len(attempts) != 1  # First alert cannot be delivered.
+
+            monitor = Monitor(State(directory), fetch, send, 180, Mock())
+            self.assertEqual(monitor.interval, 900)
+            with patch("notice_monitor.engine.time.time", return_value=1000):
+                self.assertEqual(await monitor.check(), 900)
+            self.assertFalse(State(directory).data.get("login_alert_at", 0))
+            with patch("notice_monitor.engine.time.time", return_value=1001):
+                await monitor.check()
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(State(directory).data["login_alert_at"], 1001)
+
+            monitor = Monitor(State(directory), fetch, send, DEFAULT_INTERVAL, Mock())
+            with patch("notice_monitor.engine.time.time", return_value=1002):
+                self.assertEqual(await monitor.check(), 3600)
+            self.assertEqual(len(attempts), 2)  # No repeated alert after restart.
+            with patch("notice_monitor.engine.time.time", return_value=1001 + LOGIN_ALERT_INTERVAL):
+                await monitor.check()
+            self.assertEqual(len(attempts), 3)
+
+            failing = False
+            await monitor.check()
+            self.assertEqual(State(directory).data["login_alert_at"], 0)
+            failing = True
+            with patch("notice_monitor.engine.time.time", return_value=1002 + LOGIN_ALERT_INTERVAL):
+                await monitor.check()
+            self.assertEqual(len(attempts), 4)
+            self.assertIn("自动登录失败", attempts[-1])
+            self.assertIn("学校要求验证码", attempts[-1])
+            self.assertIn("60 分钟", attempts[-1])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(exercise(Path(tmp)))
+
+    def test_authentication_network_errors_are_login_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = PortalClient(Path(tmp), "fake-student", "fake-password")
+            try:
+                with patch.object(client.session, "request", side_effect=requests.Timeout("private details")):
+                    with self.assertRaises(LoginRequired) as error:
+                        client._request("GET", LOGIN_URL)
+                    self.assertNotIn("private details", str(error.exception))
+                with patch.object(client, "_request", return_value=response(LOGIN_URL, FORM_HTML.format(token=1))):
+                    with patch.object(client, "_login", side_effect=MonitorError("认证过程中网络失败")):
+                        with self.assertRaisesRegex(LoginRequired, "重新登录失败"):
+                            client.fetch()
             finally:
                 client.close()
 
