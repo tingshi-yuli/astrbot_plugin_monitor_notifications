@@ -1,7 +1,6 @@
 """HIT CAS HTTP login, following the school's public login.js/encrypt.js."""
 
 import base64
-import json
 import os
 import secrets
 import tempfile
@@ -15,29 +14,15 @@ from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .sources import HitszSource, LoginRequired, MonitorError, Notice, is_login
+from .sources import LoginRequired, MonitorError, Notice, is_login, list_url, parse_notices
+from .storage import private_dir
 
 AES_CHARS = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678"
 ALLOWED_HOSTS = {"ids.hit.edu.cn", "info.hitsz.edu.cn"}
 LOGIN_COOLDOWN = 900
-
-
-def private_dir(directory: Path):
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directory.chmod(0o700)
-
-
-def write_private_json(path: Path, value):
-    private_dir(path.parent)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".notice-")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
+LOGIN_URL = "https://ids.hit.edu.cn/authserver/login?" + urlencode({
+    "service": "http://info.hitsz.edu.cn/system/resource/code/auth/caslogin.jsp?owner=1834232703"
+})
 
 
 def encrypt_password(password: str, salt: str) -> str:
@@ -84,18 +69,17 @@ def login_form(html: str, login_url: str) -> tuple[str, dict, str]:
 
 
 class PortalClient:
-    """One synchronous fetch job; run in a worker thread from AstrBot."""
+    """Reuse the school session, renewing it on authentication expiry."""
 
-    def __init__(self, directory: Path, credentials_file: Path | None = None, timeout: int = 25):
+    def __init__(self, directory: Path, username: str, password: str):
         self.directory = directory
         private_dir(directory)
-        self.credentials_file = credentials_file or directory / "credentials.json"
-        self.cooldown_file = directory / "login_retry.json"
+        self.username, self.password = username, password
+        self.login_after = 0
         self.cookie_file = directory / "cookies.txt"
-        self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 CampusNoticeDemo/0.1",
+            "User-Agent": "Mozilla/5.0 HITSZNoticeMonitor/0.2",
             "Accept": "text/html,application/xhtml+xml,application/json",
         })
         self.session.max_redirects = 10
@@ -105,7 +89,7 @@ class PortalClient:
             try:
                 self.cookies.load(ignore_discard=True, ignore_expires=False)
             except (OSError, ValueError):
-                raise MonitorError("本地 cookies.txt 损坏，请移走该文件后重新登录。") from None
+                self.cookies.clear()  # A broken session cache can be recreated by login.
         self.session.cookies = self.cookies
 
     def close(self):
@@ -126,7 +110,7 @@ class PortalClient:
                 raise LoginRequired("拒绝向非学校 HTTPS 认证地址提交密码。")
             try:
                 response = self.session.request(
-                    method, url, allow_redirects=False, timeout=(10, self.timeout), **kwargs
+                    method, url, allow_redirects=False, timeout=(10, 25), **kwargs
                 )
             except requests.RequestException as exc:
                 # requests exceptions may include usernames, service tickets or URLs.
@@ -140,6 +124,8 @@ class PortalClient:
                 response.close()
                 continue
             if response.status_code in {401, 403}:
+                if method == "GET" and parsed.hostname == "info.hitsz.edu.cn":
+                    return response  # Let fetch() renew an expired portal session.
                 raise LoginRequired(f"学校拒绝访问（HTTP {response.status_code}），请检查账号和门户权限。")
             if response.status_code >= 400:
                 raise MonitorError(f"学校返回 HTTP {response.status_code}，稍后重试。")
@@ -158,60 +144,48 @@ class PortalClient:
             Path(name).unlink(missing_ok=True)
 
     def _login(self, response):
-        if not self.credentials_file.is_file():
-            raise LoginRequired("未配置本地账号密码。请用 demo.py credentials 保存，或导入已登录 Cookie。")
-        try:
-            self.credentials_file.chmod(0o600)
-            credentials = json.loads(self.credentials_file.read_text(encoding="utf-8"))
-            username, password = credentials["username"], credentials["password"]
-            if not isinstance(username, str) or not isinstance(password, str) or not username.strip() or not password:
-                raise ValueError
-        except (OSError, ValueError, KeyError, TypeError):
-            raise LoginRequired("账号文件需包含非空字符串 username 和 password。") from None
-        # File mtime lets an explicitly updated credential file reset the cooldown.
-        stamp = str(self.credentials_file.stat().st_mtime_ns)
-        try:
-            retry = json.loads(self.cooldown_file.read_text())
-        except FileNotFoundError:
-            retry = {}
-        except (OSError, ValueError):
-            raise LoginRequired("登录冷却记录损坏，请重新保存账号配置。") from None
-        if retry.get("stamp") == stamp and retry.get("after", 0) > time.time():
-            raise LoginRequired("自动登录处于 15 分钟冷却期；请检查密码或手动验证后导入 Cookie。")
+        if time.monotonic() < self.login_after:
+            raise LoginRequired("自动登录处于 15 分钟冷却期，请检查账号密码或认证要求。")
         action, fields, salt = login_form(response.text, response.url)
-        write_private_json(self.cooldown_file, {"stamp": stamp, "after": time.time() + LOGIN_COOLDOWN})
+        self.login_after = time.monotonic() + LOGIN_COOLDOWN
         captcha = self._request(
             "GET", "https://ids.hit.edu.cn/authserver/checkNeedCaptcha.htl",
-            params={"username": username.strip()}, headers={"Referer": response.url},
+            params={"username": self.username}, headers={"Referer": response.url},
         )
         try:
             required = captcha.json()["isNeed"]
         except (ValueError, KeyError, TypeError):
             raise LoginRequired("无法确认验证码状态，未提交密码，请检查认证页面。") from None
         if required is not False:
-            raise LoginRequired("学校要求验证码/滑块，请在浏览器完成登录后导入 Cookie。")
-        fields.update(username=username.strip(), password=encrypt_password(password, salt),
+            raise LoginRequired("学校要求验证码/滑块，当前无法自动登录；请先在学校认证平台处理。")
+        fields.update(username=self.username, password=encrypt_password(self.password, salt),
                       _eventId="submit", cllt="userNameLogin", dllt="generalLogin", rememberMe="true")
         result = self._request("POST", action, data=fields, headers={"Referer": response.url})
         if is_login(result.url, result.text):
             raise LoginRequired("自动登录未完成，请检查账号密码、验证码或二次认证；15 分钟后重试。")
 
-    def fetch(self, source: HitszSource, max_pages: int = 3) -> list[Notice]:
+    def fetch(self) -> list[Notice]:
         notices = {}
         logged_in = False
-        for page in range(1, max_pages + 1):
-            response = self._request("GET", source.page_url(page))
-            if is_login(response.url, response.text):
+        for page in range(1, 4):
+            response = self._request("GET", list_url(page))
+            if response.status_code in {401, 403} or is_login(response.url, response.text):
                 if logged_in:
                     raise LoginRequired("登录后仍无法访问通知列表，请检查门户权限。")
-                self._login(response)
+                if response.status_code in {401, 403}:
+                    self.cookies.clear()
+                    response = self._request("GET", LOGIN_URL)
+                if is_login(response.url, response.text):
+                    self._login(response)
                 logged_in = True
-                response = self._request("GET", source.page_url(page))
-            parsed = source.parse(response.text, response.url)
+                response = self._request("GET", list_url(page))
+            if response.status_code in {401, 403}:
+                raise LoginRequired("登录后仍无法访问通知列表，请检查门户权限。")
+            parsed = parse_notices(response.text, response.url)
             # Keep a verified session even if a subsequent list page fails.
             self._save_cookies()
             if logged_in:
-                self.cooldown_file.unlink(missing_ok=True)
+                self.login_after = 0
             previous_count = len(notices)
             for notice in parsed:
                 old = notices.get(notice.id)
@@ -220,41 +194,3 @@ class PortalClient:
             if len(notices) == previous_count:
                 break  # Some portals repeat the last page for out-of-range PAGENUM.
         return sorted(notices.values(), key=lambda n: (n.date, n.id), reverse=True)
-
-    def import_cookies(self, path: Path) -> int:
-        """Accept browser-export JSON or Playwright storage-state JSON."""
-        exported = json.loads(path.read_text(encoding="utf-8"))
-        entries = exported.get("cookies", []) if isinstance(exported, dict) else exported
-        if not isinstance(entries, list):
-            raise MonitorError("Cookie 文件应为 JSON 数组或包含 cookies 数组。")
-        count = 0
-        self.cookies.clear()
-        for item in entries:
-            domain = item.get("domain", "")
-            if domain.lstrip(".") not in ALLOWED_HOSTS:
-                continue
-            expires = item.get("expirationDate", item.get("expires"))
-            expires = int(expires) if expires and expires > 0 else None
-            if expires and expires <= time.time():
-                continue
-            cookie = requests.cookies.create_cookie(
-                name=item["name"], value=item["value"], domain=domain,
-                path=item.get("path", "/"), secure=bool(item.get("secure", False)),
-                expires=expires, rest={"HttpOnly": bool(item.get("httpOnly", False))},
-            )
-            self.cookies.set_cookie(cookie)
-            count += 1
-        if not count:
-            raise MonitorError("文件中没有学校门户/认证平台的未过期 Cookie。")
-        self._save_cookies()
-        self.cooldown_file.unlink(missing_ok=True)
-        return count
-
-
-def fetch_notices(directory: Path, source: HitszSource, max_pages: int = 3,
-                  timeout: int = 25, credentials_file: Path | None = None) -> list[Notice]:
-    client = PortalClient(directory, credentials_file, timeout)
-    try:
-        return client.fetch(source, max_pages)
-    finally:
-        client.close()

@@ -1,44 +1,27 @@
 {
-  "enabled": {
-    "description": "启用自动监控",
-    "type": "bool",
-    "default": true,
-    "hint": "仅对已订阅的栏目轮询。修改配置后重载插件。"
-  },
-  "source_urls": {
-    "description": "监听的通知栏目网址",
-    "type": "list",
-    "default": ["http://info.hitsz.edu.cn/list.jsp?urltype=tree.TreeTempUrl&wbtreeid=1053"],
-    "hint": "Demo 仅适配 info.hitsz.edu.cn/list.jsp；可以增加同站不同 wbtreeid 栏目。"
-  },
-  "credentials_file": {
-    "description": "本地账号文件路径",
+  "username": {
+    "description": "学校统一身份认证账号（学号/工号）",
     "type": "string",
-    "default": "credentials.json",
-    "hint": "相对路径基于本插件数据目录；也可填绝对路径。文件含 username/password，使用 demo.py credentials 创建。"
+    "default": "",
+    "secret": true
+  },
+  "password": {
+    "description": "学校统一身份认证密码",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "由 AstrBot 保存在本地插件配置中；会话到期后自动重新登录。密码遮罩不等于文件加密。"
+  },
+  "target_umo": {
+    "description": "接收通知的会话 UMO",
+    "type": "string",
+    "default": "",
+    "hint": "私聊机器人发送 AstrBot 自带的 /sid，将返回的完整 UMO 填在这里。保存配置后重载插件。"
   },
   "poll_interval_seconds": {
-    "description": "轮询间隔（秒）",
+    "description": "检查间隔（秒）",
     "type": "int",
     "default": 180,
-    "hint": "最小 30 秒；失败后逐步退避，最长 1 小时。"
-  },
-  "max_pages": {
-    "description": "每个栏目最多抓取页数",
-    "type": "int",
-    "default": 3,
-    "hint": "范围 1～10；默认覆盖前 3 页，不保证补齐长时间停机期间的全部通知。"
-  },
-  "request_timeout_seconds": {
-    "description": "单次 HTTP 读取超时（秒）",
-    "type": "int",
-    "default": 25,
-    "hint": "范围 5～120；连接超时为 10 秒。"
-  },
-  "push_on_first_run": {
-    "description": "首次订阅时推送已有通知",
-    "type": "bool",
-    "default": false,
-    "hint": "默认首次成功抓取只建立基线，后续按通知 ID 判断新增。"
+    "hint": "最小 30 秒；首次成功抓取只建立基线，之后只推送新通知。"
   }
 }

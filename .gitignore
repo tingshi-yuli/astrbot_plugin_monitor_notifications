@@ -220,6 +220,8 @@ cookies.txt
 cookies.json
 *storage-state*.json
 login_retry.json
+state.json
+*_config.json
 *.sqlite3*
 *.db
 *.log
