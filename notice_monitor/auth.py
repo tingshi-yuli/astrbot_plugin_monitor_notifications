@@ -25,6 +25,14 @@ LOGIN_URL = "https://ids.hit.edu.cn/authserver/login?" + urlencode({
 })
 
 
+def _check_secondary_auth(url: str):
+    if "/authserver/reauthcheck/" in urlsplit(url).path.lower():
+        raise LoginRequired(
+            "学校要求二次认证（App、短信等），仅凭账号密码无法完成本次登录。"
+            "需人工验证并将同一会话保存给插件；在其他浏览器单独登录不会自动同步。"
+        )
+
+
 def encrypt_password(password: str, salt: str) -> str:
     """CryptoJS AES-CBC/PKCS7(randomString(64) + password, salt, random IV)."""
     key = salt.strip().encode("utf-8")
@@ -39,6 +47,7 @@ def encrypt_password(password: str, salt: str) -> str:
 
 
 def login_form(html: str, login_url: str) -> tuple[str, dict, str]:
+    _check_secondary_auth(login_url)
     soup = BeautifulSoup(html, "html.parser")
     form = soup.select_one("form#pwdFromId")
     if form is None:
@@ -163,6 +172,7 @@ class PortalClient:
         fields.update(username=self.username, password=encrypt_password(self.password, salt),
                       _eventId="submit", cllt="userNameLogin", dllt="generalLogin", rememberMe="true")
         result = self._request("POST", action, data=fields, headers={"Referer": response.url})
+        _check_secondary_auth(result.url)
         if is_login(result.url, result.text):
             raise LoginRequired("自动登录未完成，请检查账号密码、验证码或二次认证。")
 

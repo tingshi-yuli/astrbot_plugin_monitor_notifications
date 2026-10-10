@@ -118,6 +118,26 @@ class CoreTests(unittest.TestCase):
             finally:
                 client.close()
 
+    def test_secondary_auth_redirect_reports_manual_verification(self):
+        url = "https://ids.hit.edu.cn/authserver/reAuthCheck/reAuthLoginView.do"
+        with self.assertRaisesRegex(LoginRequired, "学校要求二次认证"):
+            login_form("<html>Extra verification</html>", url)
+        with tempfile.TemporaryDirectory() as tmp:
+            client = PortalClient(Path(tmp), "fake-student", "fake-password")
+            try:
+                page = response(LOGIN_URL, FORM_HTML.format(token=1))
+                with patch.object(client, "_request", side_effect=[
+                    response(LOGIN_URL, '{"isNeed":false}'),
+                    response(url, "<html>Private account details</html>"),
+                ]) as request:
+                    with self.assertRaisesRegex(LoginRequired, "学校要求二次认证") as error:
+                        client._login(page)
+                    self.assertNotIn("Private account details", str(error.exception))
+                    self.assertEqual(request.call_count, 2)
+                    self.assertEqual(request.call_args.args[0], "POST")
+            finally:
+                client.close()
+
     def test_failed_push_survives_restart_and_failed_fetch(self):
         async def exercise(directory):
             old = Notice("wbnews:1", "原有的通知", "https://info.hitsz.edu.cn/1", "2026-10-07")
