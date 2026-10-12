@@ -1,9 +1,11 @@
 """HIT CAS HTTP login, following the school's public login.js/encrypt.js."""
 
 import base64
+import hashlib
 import os
 import secrets
 import tempfile
+import threading
 import time
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
@@ -14,15 +16,25 @@ from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .sources import LoginRequired, MonitorError, Notice, is_login, list_url, parse_notices
+from .details import parse_detail, portal_url
+from .sources import (
+    LoginRequired,
+    MonitorError,
+    Notice,
+    is_login,
+    list_url,
+    parse_notices,
+)
 from .storage import private_dir
 
 AES_CHARS = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678"
 ALLOWED_HOSTS = {"ids.hit.edu.cn", "info.hitsz.edu.cn"}
 LOGIN_COOLDOWN = 900
-LOGIN_URL = "https://ids.hit.edu.cn/authserver/login?" + urlencode({
-    "service": "http://info.hitsz.edu.cn/system/resource/code/auth/caslogin.jsp?owner=1834232703"
-})
+LOGIN_URL = "https://ids.hit.edu.cn/authserver/login?" + urlencode(
+    {
+        "service": "http://info.hitsz.edu.cn/system/resource/code/auth/caslogin.jsp?owner=1834232703"
+    }
+)
 
 
 def _check_secondary_auth(url: str):
@@ -73,7 +85,9 @@ def login_form(html: str, login_url: str) -> tuple[str, dict, str]:
         raise LoginRequired("登录回调不属于哈工深通知门户，未提交密码。")
     # login.js appends service to the form action in the browser.
     query["service"] = service
-    action = urlunsplit(action._replace(query=urlencode(query, doseq=True), fragment=""))
+    action = urlunsplit(
+        action._replace(query=urlencode(query, doseq=True), fragment="")
+    )
     return action, fields, salt["value"]
 
 
@@ -82,15 +96,18 @@ class PortalClient:
 
     def __init__(self, directory: Path, username: str, password: str):
         self.directory = directory
+        self.lock = threading.RLock()
         private_dir(directory)
         self.username, self.password = username, password
         self.login_after = 0
         self.cookie_file = directory / "cookies.txt"
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 HITSZNoticeMonitor/0.2",
-            "Accept": "text/html,application/xhtml+xml,application/json",
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": "Mozilla/5.0 HITSZNoticeMonitor/0.2",
+                "Accept": "text/html,application/xhtml+xml,application/json",
+            }
+        )
         self.session.max_redirects = 10
         self.cookies = MozillaCookieJar(str(self.cookie_file))
         if self.cookie_file.exists():
@@ -102,20 +119,26 @@ class PortalClient:
         self.session.cookies = self.cookies
 
     def close(self):
-        self.session.close()
+        with self.lock:
+            self.session.close()
 
     def _request(self, method: str, url: str, **kwargs):
         # Check each redirect, including 307/308, before forwarding credentials.
         for _ in range(11):
             parsed = urlsplit(url)
-            if (parsed.hostname not in ALLOWED_HOSTS
+            if (
+                parsed.hostname not in ALLOWED_HOSTS
                 or parsed.scheme not in {"http", "https"}
-                or parsed.username or parsed.password
-                or parsed.port not in {None, 80, 443}):
+                or parsed.username
+                or parsed.password
+                or parsed.port not in {None, 80, 443}
+            ):
                 raise MonitorError("学校请求跳转到了未支持的地址。")
             if parsed.hostname == "ids.hit.edu.cn" and parsed.scheme != "https":
                 raise LoginRequired("认证平台未使用 HTTPS，已停止登录。")
-            if method == "POST" and (parsed.scheme != "https" or parsed.hostname != "ids.hit.edu.cn"):
+            if method == "POST" and (
+                parsed.scheme != "https" or parsed.hostname != "ids.hit.edu.cn"
+            ):
                 raise LoginRequired("拒绝向非学校 HTTPS 认证地址提交密码。")
             try:
                 response = self.session.request(
@@ -123,11 +146,19 @@ class PortalClient:
                 )
             except requests.RequestException as exc:
                 # requests exceptions may include usernames, service tickets or URLs.
-                error_type = LoginRequired if parsed.hostname == "ids.hit.edu.cn" else MonitorError
-                raise error_type(f"学校网络请求失败（{type(exc).__name__}），请检查网络或代理。") from None
+                error_type = (
+                    LoginRequired
+                    if parsed.hostname == "ids.hit.edu.cn"
+                    else MonitorError
+                )
+                raise error_type(
+                    f"学校网络请求失败（{type(exc).__name__}），请检查网络或代理。"
+                ) from None
             if response.is_redirect:
                 url = urljoin(response.url, response.headers["Location"])
-                if response.status_code == 303 or (method == "POST" and response.status_code in {301, 302}):
+                if response.status_code == 303 or (
+                    method == "POST" and response.status_code in {301, 302}
+                ):
                     method = "GET"
                     kwargs.pop("data", None)
                 kwargs.pop("params", None)
@@ -136,9 +167,15 @@ class PortalClient:
             if response.status_code in {401, 403}:
                 if method == "GET" and parsed.hostname == "info.hitsz.edu.cn":
                     return response  # Let fetch() renew an expired portal session.
-                raise LoginRequired(f"学校拒绝访问（HTTP {response.status_code}），请检查账号和门户权限。")
+                raise LoginRequired(
+                    f"学校拒绝访问（HTTP {response.status_code}），请检查账号和门户权限。"
+                )
             if response.status_code >= 400:
-                error_type = LoginRequired if parsed.hostname == "ids.hit.edu.cn" else MonitorError
+                error_type = (
+                    LoginRequired
+                    if parsed.hostname == "ids.hit.edu.cn"
+                    else MonitorError
+                )
                 raise error_type(f"学校返回 HTTP {response.status_code}，稍后重试。")
             if response.encoding is None or response.encoding.lower() == "iso-8859-1":
                 response.encoding = "utf-8"
@@ -156,68 +193,160 @@ class PortalClient:
 
     def _login(self, response):
         if time.monotonic() < self.login_after:
-            raise LoginRequired("自动登录处于 15 分钟冷却期，请检查账号密码或认证要求。")
+            raise LoginRequired(
+                "自动登录处于 15 分钟冷却期，请检查账号密码或认证要求。"
+            )
         action, fields, salt = login_form(response.text, response.url)
         self.login_after = time.monotonic() + LOGIN_COOLDOWN
         captcha = self._request(
-            "GET", "https://ids.hit.edu.cn/authserver/checkNeedCaptcha.htl",
-            params={"username": self.username}, headers={"Referer": response.url},
+            "GET",
+            "https://ids.hit.edu.cn/authserver/checkNeedCaptcha.htl",
+            params={"username": self.username},
+            headers={"Referer": response.url},
         )
         try:
             required = captcha.json()["isNeed"]
         except (ValueError, KeyError, TypeError):
-            raise LoginRequired("无法确认验证码状态，未提交密码，请检查认证页面。") from None
+            raise LoginRequired(
+                "无法确认验证码状态，未提交密码，请检查认证页面。"
+            ) from None
         if required is not False:
-            raise LoginRequired("学校要求验证码/滑块，当前无法自动登录；请先在学校认证平台处理。")
-        fields.update(username=self.username, password=encrypt_password(self.password, salt),
-                      _eventId="submit", cllt="userNameLogin", dllt="generalLogin", rememberMe="true")
-        result = self._request("POST", action, data=fields, headers={"Referer": response.url})
+            raise LoginRequired(
+                "学校要求验证码/滑块，当前无法自动登录；请先在学校认证平台处理。"
+            )
+        fields.update(
+            username=self.username,
+            password=encrypt_password(self.password, salt),
+            _eventId="submit",
+            cllt="userNameLogin",
+            dllt="generalLogin",
+            rememberMe="true",
+        )
+        result = self._request(
+            "POST", action, data=fields, headers={"Referer": response.url}
+        )
         _check_secondary_auth(result.url)
         if is_login(result.url, result.text):
             raise LoginRequired("自动登录未完成，请检查账号密码、验证码或二次认证。")
 
-    def fetch(self) -> list[Notice]:
-        notices = {}
-        logged_in = False
-        for page in range(1, 4):
-            response = self._request("GET", list_url(page))
-            returned_url = urlsplit(response.url)
-            # An existing CAS session can renew the portal session without a
-            # password form. Its HTTP 200 callback uses JavaScript to return to
-            # the list, so request our original page again without executing JS.
-            portal_callback = (
-                returned_url.hostname == "info.hitsz.edu.cn"
-                and returned_url.path == "/system/resource/code/auth/caslogin.jsp"
+    def _page(self, url, *, stream=False):
+        """Renew CAS once and return to the exact requested portal resource."""
+        portal_url(url, url)
+        response = self._request("GET", url, stream=stream)
+
+        def needs_login(page):
+            returned = urlsplit(page.url)
+            return (
+                page.status_code in {401, 403}
+                or returned.hostname == "ids.hit.edu.cn"
+                or returned.path == "/system/resource/code/auth/caslogin.jsp"
+                or (
+                    not page.headers.get("Content-Type", "").startswith("image/")
+                    and is_login(page.url, page.text)
+                )
             )
-            if response.status_code in {401, 403} or is_login(response.url, response.text) or portal_callback:
-                if logged_in:
-                    raise LoginRequired("登录后仍无法访问通知列表，请检查门户权限。")
-                try:
-                    if response.status_code in {401, 403}:
-                        self.cookies.clear()
-                        response = self._request("GET", LOGIN_URL)
-                    if is_login(response.url, response.text):
-                        self._login(response)
-                    logged_in = True
-                    response = self._request("GET", list_url(page))
-                except LoginRequired:
-                    raise
-                except MonitorError as exc:
-                    # Network failures during authentication must also trigger
-                    # the login warning instead of only a background log.
-                    raise LoginRequired(f"重新登录失败：{exc}") from None
-            if response.status_code in {401, 403}:
-                raise LoginRequired("登录后仍无法访问通知列表，请检查门户权限。")
-            parsed = parse_notices(response.text, response.url)
-            # Keep a verified session even if a subsequent list page fails.
-            self._save_cookies()
-            if logged_in:
+
+        if needs_login(response):
+            try:
+                if response.status_code in {401, 403}:
+                    response.close()
+                    # Retain CAS and trusted-device cookies when only the portal expired.
+                    for cookie in list(self.cookies):
+                        if cookie.domain.lstrip(".") == "info.hitsz.edu.cn":
+                            self.cookies.clear(cookie.domain, cookie.path, cookie.name)
+                    response = self._request("GET", LOGIN_URL)
+                if is_login(response.url, response.text):
+                    self._login(response)
+                response.close()
+                response = self._request("GET", url, stream=stream)
+                if needs_login(response):
+                    _check_secondary_auth(response.url)
+                    raise LoginRequired(
+                        "登录后仍无法访问学校通知，请检查门户权限或二次认证。"
+                    )
                 self.login_after = 0
-            previous_count = len(notices)
-            for notice in parsed:
-                old = notices.get(notice.id)
-                if old is None or (not old.date and notice.date):
-                    notices[notice.id] = notice
-            if len(notices) == previous_count:
-                break  # Some portals repeat the last page for out-of-range PAGENUM.
-        return sorted(notices.values(), key=lambda n: (n.date, n.id), reverse=True)
+            except LoginRequired:
+                response.close()
+                raise
+            except MonitorError as exc:
+                response.close()
+                raise LoginRequired(f"重新登录失败：{exc}") from None
+        return response
+
+    def fetch(self) -> list[Notice]:
+        with self.lock:
+            notices = {}
+            for page in range(1, 4):
+                with self._page(list_url(page)) as response:
+                    parsed = parse_notices(response.text, response.url)
+                self._save_cookies()
+                previous_count = len(notices)
+                for notice in parsed:
+                    old = notices.get(notice.id)
+                    if old is None or (not old.date and notice.date):
+                        notices[notice.id] = notice
+                if len(notices) == previous_count:
+                    break
+            return sorted(notices.values(), key=lambda n: (n.date, n.id), reverse=True)
+
+    def fetch_detail(self, notice: Notice) -> dict:
+        with self.lock:
+            with self._page(notice.url) as response:
+                record = parse_detail(response.text, notice, response.url)
+            self._save_cookies()
+            used, count = 0, 0
+            for block in record["blocks"]:
+                if block["type"] != "image":
+                    continue
+                count += 1
+                try:
+                    if not block["url"]:
+                        raise MonitorError("图片地址不属于学校通知门户或地址为空")
+                    if count > 20 or used >= 20 * 1024 * 1024:
+                        raise MonitorError("超出单篇 20 张图片或 20 MB 图片缓存上限")
+                    data = self._image(
+                        block["url"], min(5 * 1024 * 1024, 20 * 1024 * 1024 - used)
+                    )
+                    used += len(data)
+                    directory = self.directory / "images"
+                    private_dir(directory)
+                    name = hashlib.sha256(data).hexdigest() + ".img"
+                    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".image-")
+                    try:
+                        with os.fdopen(fd, "wb") as output:
+                            output.write(data)
+                        os.replace(temporary, directory / name)
+                    finally:
+                        Path(temporary).unlink(missing_ok=True)
+                    block["file"] = name
+                except (MonitorError, requests.RequestException, OSError) as exc:
+                    block["error"] = (
+                        str(exc) if isinstance(exc, MonitorError) else "图片缓存失败"
+                    )
+            self._save_cookies()
+            return record
+
+    def _image(self, url, limit):
+        with self._page(url, stream=True) as response:
+            if (
+                not response.headers.get("Content-Type", "")
+                .lower()
+                .startswith("image/")
+            ):
+                raise MonitorError("学校未返回图片内容，可能需要重新认证")
+            data = bytearray()
+            for chunk in response.iter_content(65536):
+                data.extend(chunk)
+                if len(data) > limit:
+                    raise MonitorError(
+                        "图片超过大小上限（单张最多 5 MB，单篇最多 20 MB）"
+                    )
+            raster = (
+                data.startswith(b"\x89PNG\r\n\x1a\n")
+                or data.startswith(b"\xff\xd8\xff")
+                or data.startswith((b"GIF87a", b"GIF89a"))
+                or (data.startswith(b"RIFF") and data[8:12] == b"WEBP")
+            )
+            if not raster:
+                raise MonitorError("图片格式暂不支持（仅支持 PNG/JPEG/GIF/WebP）")
+            return bytes(data)

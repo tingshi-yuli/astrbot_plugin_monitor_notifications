@@ -11,9 +11,10 @@ LOGIN_ALERT_INTERVAL = 24 * 3600
 
 
 class Monitor:
-    def __init__(self, state, fetch, send, interval, logger):
+    def __init__(self, state, fetch, send, interval, logger, deliver=None):
         self.state, self.fetch, self.send = state, fetch, send
         self.interval, self.logger = max(MIN_INTERVAL, int(interval)), logger
+        self.deliver = deliver
 
     async def _send(self, text):
         if await asyncio.wait_for(self.send(text), timeout=30) is False:
@@ -35,7 +36,10 @@ class Monitor:
             # Do not suppress a future alert until delivery has succeeded.
             self.state.login_alerted(time.time())
         except Exception as exc:
-            self.logger.warning("Campus notice failure alert could not be sent (%s); retrying next cycle.", type(exc).__name__)
+            self.logger.warning(
+                "Campus notice failure alert could not be sent (%s); retrying next cycle.",
+                type(exc).__name__,
+            )
 
     async def _fetch(self):
         task = asyncio.create_task(asyncio.to_thread(self.fetch))
@@ -54,17 +58,26 @@ class Monitor:
         try:
             self.state.observe(await self._fetch())
         except Exception as exc:
-            message = str(exc) if isinstance(exc, MonitorError) else f"抓取失败（{type(exc).__name__}）"
+            message = (
+                str(exc)
+                if isinstance(exc, MonitorError)
+                else f"抓取失败（{type(exc).__name__}）"
+            )
             self.logger.warning("校园通知：%s", message)
             await self._alert_failure(message, isinstance(exc, LoginRequired))
         # Retry saved notices even when the school is temporarily unavailable.
         for notice in list(self.state.pending.values()):
             text = f"【哈工深新通知】\n{notice['title']}\n日期：{notice['date'] or '未标注'}\n{notice['url']}"
             try:
-                await self._send(text)
+                if self.deliver:
+                    await self.deliver(notice)
+                else:
+                    await self._send(text)
                 self.state.delivered(notice["id"])
             except Exception as exc:
-                self.logger.warning("校园通知推送失败（%s），下一轮重试。", type(exc).__name__)
+                self.logger.warning(
+                    "校园通知推送失败（%s），下一轮重试。", type(exc).__name__
+                )
                 break
         return delay
 

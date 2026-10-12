@@ -16,12 +16,36 @@
     "description": "接收通知的会话 UMO",
     "type": "string",
     "default": "",
-    "hint": "私聊机器人发送 AstrBot 自带的 /sid，将返回的完整 UMO 填在这里。保存配置后重载插件。"
+    "hint": "当前功能支持 QQ OneBot 私聊，例如 QQ:FriendMessage:1351005269。私聊发送 /sid 获取完整 UMO，保存后重载插件。"
   },
   "poll_interval_seconds": {
     "description": "检查间隔（秒）",
     "type": "int",
     "default": 3600,
     "hint": "默认 1 小时（3600 秒），最少 15 分钟（900 秒）；低于 900 按 900 执行。首次成功抓取只建立基线。"
+  },
+  "enable_ai_summary": {
+    "description": "新通知附带 AI 摘要",
+    "type": "bool",
+    "default": true,
+    "hint": "使用 AstrBot 模型总结已登录抓取的正文文字；模型超时或正文不可用时仍推送标题、日期和链接。通知文字会发送至所选模型服务。"
+  },
+  "summary_provider_id": {
+    "description": "摘要模型提供商 ID（选填）",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用推送会话当前选择的模型；可填 AstrBot 已配置的提供商 ID。"
+  },
+  "detail_triggers": {
+    "description": "引用通知索取正文的触发词",
+    "type": "list",
+    "default": [
+      "详细",
+      "全文",
+      "原文",
+      "展开",
+      "打包"
+    ],
+    "hint": "仅在目标 QQ 私聊引用本插件的通知时生效；支持增加自定义短语。"
   }
 }
