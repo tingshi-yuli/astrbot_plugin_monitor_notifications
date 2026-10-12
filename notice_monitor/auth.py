@@ -181,7 +181,15 @@ class PortalClient:
         logged_in = False
         for page in range(1, 4):
             response = self._request("GET", list_url(page))
-            if response.status_code in {401, 403} or is_login(response.url, response.text):
+            returned_url = urlsplit(response.url)
+            # An existing CAS session can renew the portal session without a
+            # password form. Its HTTP 200 callback uses JavaScript to return to
+            # the list, so request our original page again without executing JS.
+            portal_callback = (
+                returned_url.hostname == "info.hitsz.edu.cn"
+                and returned_url.path == "/system/resource/code/auth/caslogin.jsp"
+            )
+            if response.status_code in {401, 403} or is_login(response.url, response.text) or portal_callback:
                 if logged_in:
                     raise LoginRequired("登录后仍无法访问通知列表，请检查门户权限。")
                 try:

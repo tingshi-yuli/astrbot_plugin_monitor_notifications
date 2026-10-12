@@ -19,15 +19,15 @@ class Monitor:
         if await asyncio.wait_for(self.send(text), timeout=30) is False:
             raise RuntimeError("Message platform rejected the send")
 
-    async def _alert_login_failure(self, message):
+    async def _alert_failure(self, message, login_failure):
+        # Keep the existing timestamp key to preserve alert cooldowns on upgrade.
         last_alert = self.state.data.get("login_alert_at", 0)
         if last_alert and 0 <= time.time() - last_alert < LOGIN_ALERT_INTERVAL:
             return
         text = (
-            "【哈工深通知：自动登录失败】\n"
+            f"【哈工深通知：{'自动登录失败' if login_failure else '通知检查失败'}】\n"
             f"原因：{message}\n"
-            "目前无法检查新通知，可能漏掉更新。请检查本地插件配置中的账号密码，"
-            "以及学校是否要求验证码或二次认证。\n"
+            "目前无法检查新通知，可能漏掉更新。请根据上述原因检查学校认证状态、网络或插件配置。\n"
             f"插件将在约 {self.interval / 60:g} 分钟后重试；持续失败每 24 小时提醒一次。"
         )
         try:
@@ -35,7 +35,7 @@ class Monitor:
             # Do not suppress a future alert until delivery has succeeded.
             self.state.login_alerted(time.time())
         except Exception as exc:
-            self.logger.warning("登录失败提醒发送失败（%s），下一轮重试。", type(exc).__name__)
+            self.logger.warning("Campus notice failure alert could not be sent (%s); retrying next cycle.", type(exc).__name__)
 
     async def _fetch(self):
         task = asyncio.create_task(asyncio.to_thread(self.fetch))
@@ -56,8 +56,7 @@ class Monitor:
         except Exception as exc:
             message = str(exc) if isinstance(exc, MonitorError) else f"抓取失败（{type(exc).__name__}）"
             self.logger.warning("校园通知：%s", message)
-            if isinstance(exc, LoginRequired):
-                await self._alert_login_failure(message)
+            await self._alert_failure(message, isinstance(exc, LoginRequired))
         # Retry saved notices even when the school is temporarily unavailable.
         for notice in list(self.state.pending.values()):
             text = f"【哈工深新通知】\n{notice['title']}\n日期：{notice['date'] or '未标注'}\n{notice['url']}"

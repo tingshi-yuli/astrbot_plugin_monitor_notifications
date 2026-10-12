@@ -5,7 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import requests
 
@@ -118,6 +118,38 @@ class CoreTests(unittest.TestCase):
             finally:
                 client.close()
 
+    def test_existing_cas_session_finishes_javascript_portal_callback(self):
+        callback = "http://info.hitsz.edu.cn/system/resource/code/auth/caslogin.jsp"
+        expired = True
+        callbacks = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            client = PortalClient(Path(tmp), "fake-student", "fake-password")
+
+            def request(method, url, **kwargs):
+                nonlocal expired, callbacks
+                self.assertEqual(method, "GET")  # Valid CAS cookies need no password.
+                if url == LOGIN_URL:
+                    return response(url, status=302, location=callback)
+                if url == callback:
+                    expired = False
+                    callbacks += 1
+                    return response(url, f"<script>window.location.href='{DEFAULT_URL}'</script>")
+                self.assertTrue(url.startswith(DEFAULT_URL))
+                if expired:
+                    return response(url, status=302, location=LOGIN_URL)
+                return response(url, LIST_HTML)
+
+            try:
+                with patch.object(client.session, "request", side_effect=request):
+                    with patch.object(client, "_login") as login:
+                        self.assertEqual(len(client.fetch()), 1)
+                        expired = True  # The portal can expire before the next hourly poll.
+                        self.assertEqual(len(client.fetch()), 1)
+                        login.assert_not_called()
+                self.assertEqual(callbacks, 2)
+            finally:
+                client.close()
+
     def test_secondary_auth_redirect_reports_manual_verification(self):
         url = "https://ids.hit.edu.cn/authserver/reAuthCheck/reAuthLoginView.do"
         with self.assertRaisesRegex(LoginRequired, "学校要求二次认证"):
@@ -172,7 +204,7 @@ class CoreTests(unittest.TestCase):
             state = State(directory)
             state.observe([old, new])
             self.assertFalse(state.pending)
-            self.assertEqual(len(delivered), 1)
+            self.assertEqual(sum(text.startswith("【哈工深新通知】") for text in delivered), 1)
 
         with tempfile.TemporaryDirectory() as tmp:
             asyncio.run(exercise(Path(tmp)))
@@ -249,6 +281,30 @@ class CoreTests(unittest.TestCase):
                             client.fetch()
             finally:
                 client.close()
+
+    def test_parse_failure_alert_survives_restart_and_resets_after_recovery(self):
+        async def exercise(directory):
+            fetch = Mock(side_effect=ParseError("未找到通知列表"))
+            send = AsyncMock(return_value=True)
+            monitor = Monitor(State(directory), fetch, send, DEFAULT_INTERVAL, Mock())
+            await monitor.check()
+            self.assertEqual(send.await_count, 1)
+            self.assertIn("通知检查失败", send.call_args.args[0])
+            self.assertIn("未找到通知列表", send.call_args.args[0])
+
+            monitor = Monitor(State(directory), fetch, send, DEFAULT_INTERVAL, Mock())
+            await monitor.check()
+            self.assertEqual(send.await_count, 1)
+            fetch.side_effect = None
+            fetch.return_value = parse_notices(LIST_HTML)
+            await monitor.check()
+            self.assertEqual(State(directory).data["login_alert_at"], 0)
+            fetch.side_effect = ParseError("未找到通知列表")
+            await monitor.check()
+            self.assertEqual(send.await_count, 2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(exercise(Path(tmp)))
 
 
 if __name__ == "__main__":
