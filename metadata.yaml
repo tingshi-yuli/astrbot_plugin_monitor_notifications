@@ -1,7 +1,7 @@
 name: astrbot_plugin_monitor_notifications
 display_name: 哈工深官网通知监控
-desc: 自动登录哈工深官网，推送新通知及 AI 摘要，引用获取完整正文。
-version: v0.3.0
+desc: 自动登录哈工深官网，推送新通知及 AI 摘要，引用或紧接回复获取正文。
+version: v0.3.1
 author: youyi
 repo: "https://github.com/tingshi-yuli/astrbot_plugin_monitor_notifications"
 astrbot_version: ">=4.9.2,<5"
