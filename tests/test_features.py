@@ -201,6 +201,119 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QQTests(unittest.IsolatedAsyncioTestCase):
+    async def test_history_uses_real_sequence_and_anchors_the_current_request(self):
+        # IDs and timestamps cannot establish message order. Newer messages
+        # arriving during the lookup must not change this request's predecessor.
+        messages = [
+            {
+                "message_id": 900,
+                "real_seq": "103",
+                "message_seq": 900,
+                "time": 1000,
+                "message_type": "private",
+                "sender": {"user_id": 9999},
+            },
+            {
+                "message_id": -50,
+                "real_seq": "102",
+                "message_seq": -50,
+                "time": 1000,
+                "message_type": "private",
+                "sender": {"user_id": 123},
+            },
+            {
+                "message_id": 400,
+                "real_seq": "101",
+                "message_seq": 400,
+                "time": 1000,
+                "message_type": "private",
+                "sender": {"user_id": 9999},
+            },
+        ]
+        for history in (messages, list(reversed(messages))):
+            call = AsyncMock(return_value={"messages": history})
+            previous = await QQTransport(call, 123).previous_message_id("-50", "9999")
+            self.assertEqual(previous, "400")
+            self.assertEqual(call.call_args.args, ("get_friend_msg_history",))
+            self.assertEqual(call.call_args.kwargs["user_id"], 123)
+            self.assertFalse(call.call_args.kwargs["parse_mult_msg"])
+
+    async def test_history_keeps_intervening_messages_and_rejects_gaps(self):
+        bot = {
+            "message_id": 40,
+            "real_seq": "100",
+            "message_type": "private",
+            "sender": {"user_id": 9999},
+        }
+        request = {
+            "message_id": 42,
+            "real_seq": "102",
+            "message_type": "private",
+            "sender": {"user_id": 123},
+        }
+        for sender, expected in ((123, None), (9999, "41")):
+            other = {
+                "message_id": 41,
+                "real_seq": "101",
+                "message_type": "private",
+                "sender": {"user_id": sender},
+                "message": [{"type": "image", "data": {}}],
+            }
+            call = AsyncMock(return_value={"messages": [bot, other, request]})
+            self.assertEqual(
+                await QQTransport(call, 123).previous_message_id(42, 9999), expected
+            )
+        for history in (
+            [bot, request],  # Sequence 101 is missing (e.g. a recalled message).
+            [{k: v for k, v in bot.items() if k != "real_seq"}, request],
+            [bot, {**bot, "message_id": 39}, request],
+            [bot, {**request, "message_type": "group"}],
+            [bot, {**request, "sender": {"user_id": 456}}],
+            [bot, {**request, "self_id": 8888}],
+        ):
+            with self.subTest(history=history):
+                call = AsyncMock(return_value={"messages": history})
+                self.assertIsNone(
+                    await QQTransport(call, 123).previous_message_id(42, 9999)
+                )
+
+    async def test_history_sync_retry_and_failure_are_bounded(self):
+        bot = {
+            "message_id": 40,
+            "real_seq": "100",
+            "message_type": "private",
+            "sender": {"user_id": 9999},
+        }
+        request = {
+            "message_id": 41,
+            "real_seq": "101",
+            "message_type": "private",
+            "sender": {"user_id": 123},
+        }
+        with patch("notice_monitor.qq.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            call = AsyncMock(
+                side_effect=[{"messages": [bot]}, {"messages": [bot, request]}]
+            )
+            self.assertEqual(
+                await QQTransport(call, 123).previous_message_id(41, 9999), "40"
+            )
+            self.assertEqual(call.await_count, 2)
+            sleep.assert_awaited_once_with(0.3)
+            for failure in (
+                DeliveryUnknown("timeout"),
+                DeliveryRejected("unsupported"),
+            ):
+                call = AsyncMock(side_effect=failure)
+                self.assertIsNone(
+                    await QQTransport(call, 123).previous_message_id(41, 9999)
+                )
+                self.assertLessEqual(call.await_count, 2)
+            call = AsyncMock(return_value={"messages": [bot]})
+            self.assertIsNone(
+                await QQTransport(call, 123).previous_message_id(41, 9999)
+            )
+            self.assertEqual(call.await_count, 2)
+
     async def test_forward_receipts_and_explicit_fallback(self):
         call = AsyncMock(
             side_effect=[

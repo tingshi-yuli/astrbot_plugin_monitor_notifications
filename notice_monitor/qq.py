@@ -72,6 +72,74 @@ class QQTransport:
                 for content in batch:
                     await self._send("send_private_msg", message=content)
 
+    async def previous_message_id(self, message_id, self_id):
+        """Find a bot message immediately before this user's request.
+
+        Args:
+            message_id: ID of the incoming detail request.
+            self_id: ID of the bot receiving that request.
+
+        Returns:
+            The preceding bot message ID, or None if adjacency is unconfirmed.
+        """
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(0.3)
+            try:
+                result = await asyncio.wait_for(
+                    self._call(
+                        "get_friend_msg_history",
+                        user_id=self.user_id,
+                        count=20,
+                        parse_mult_msg=False,
+                        disable_get_url=True,
+                    ),
+                    timeout=3,
+                )
+            except DeliveryRejected:
+                return None
+            except (MonitorError, asyncio.TimeoutError):
+                continue
+            messages = result.get("messages") if isinstance(result, dict) else None
+            if not isinstance(messages, list):
+                return None
+            try:
+                # NapCat's message_seq is an opaque message ID. Only real_seq
+                # represents the conversation order, including both senders.
+                ordered = sorted(messages, key=lambda m: int(m["real_seq"]))
+                ids = [str(m["message_id"]) for m in ordered]
+                seqs = [int(m["real_seq"]) for m in ordered]
+                senders = [str(m["sender"]["user_id"]) for m in ordered]
+                if (
+                    len(set(ids)) != len(ids)
+                    or len(set(seqs)) != len(seqs)
+                    or any(seq <= 0 for seq in seqs)
+                    or any(m["message_type"] != "private" for m in ordered)
+                    or any(
+                        sender not in {str(self_id), str(self.user_id)}
+                        for sender in senders
+                    )
+                    or any(
+                        str(m.get("self_id", self_id)) != str(self_id) for m in ordered
+                    )
+                ):
+                    return None
+            except (KeyError, TypeError, ValueError):
+                return None
+            if str(message_id) not in ids:
+                continue  # The incoming message may not be in QQ history yet.
+            index = ids.index(str(message_id))
+            if index == 0:
+                continue
+            if (
+                senders[index] != str(self.user_id)
+                or senders[index - 1] != str(self_id)
+                or seqs[index] - seqs[index - 1] != 1
+            ):
+                return None  # Missing/recalled messages must not look adjacent.
+            return ids[index - 1]
+        return None
+
     async def read_own_text(self, message_id, self_id):
         result = await self._call("get_msg", message_id=int(message_id))
         if (

@@ -125,12 +125,23 @@ class CampusNoticePlugin(Star):
         request = "".join(
             part.text for part in messages if isinstance(part, Plain)
         ).strip()
-        if reply is None or not wants_detail(request, self.triggers):
+        if not wants_detail(request, self.triggers):
             return
         job = asyncio.current_task()
         self.jobs.add(job)
         try:
-            notice = await self.service.resolve_reply(reply.id, event.get_self_id())
+            if reply is not None:
+                # An explicit quote always wins, even when it cannot be resolved.
+                message_id = reply.id
+            else:
+                if not all(isinstance(part, Plain) for part in messages):
+                    return
+                message_id = await self.service.transport.previous_message_id(
+                    event.message_obj.message_id, event.get_self_id()
+                )
+                if message_id is None:
+                    return
+            notice = await self.service.resolve_reply(message_id, event.get_self_id())
             if notice is None:
                 return
             event.stop_event()
